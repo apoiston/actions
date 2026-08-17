@@ -1,0 +1,387 @@
+name: "builder"
+description: "builder"
+author: apois
+
+inputs:
+  repo_url:
+    description: 'repository url'
+    required: false
+    default: 'https://github.com/openwrt/openwrt.git'
+
+  repo_branch:
+    description: 'repository branch'
+    required: false
+    default: 'main'
+
+  private_key:
+    description: 'private key'
+    required: false
+    default: ''
+
+  public_key:
+    description: 'public key'
+    required: false
+    default: ''
+
+  prepare_base:
+    description: ''
+    required: false
+    default: ''
+
+  extend_config:
+    description: ''
+    required: false
+    default: ''
+
+  export_dist:
+    description: ''
+    required: false
+    default: ''
+
+  enable_build_tools:
+    description: ''
+    required: false
+    default: 'false'
+
+  enable_build_kernel:
+    description: ''
+    required: false
+    default: 'false'
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Set timezone
+      id: timezone
+      shell: bash
+      run: |
+        echo "::group::Set timezone"
+        sudo timedatectl set-timezone Asia/Shanghai
+        date +"%Y-%m-%d %H:%M:%S %:z"
+        echo "start_time=$(date +'%Y-%m-%d %H:%M:%S')" >> "$GITHUB_OUTPUT"
+        echo "::endgroup::"
+
+    - name: Check disk
+      shell: bash
+      run: |
+        echo "::group::Check disk"
+        df -Th /
+        echo "::endgroup::"
+
+    - name: Install buildsystem
+      shell: bash
+      run: |
+        echo "::group::Install buildsystem"
+        sudo apt-get update -qq && sudo apt-get install -y -qq \
+        build-essential g++ gawk gettext \
+        flex bison swig \
+        libncurses-dev libssl-dev zlib1g-dev \
+        python3-setuptools meson ninja-build mold ccache \
+        file wget rsync git unzip zstd pigz pbzip2
+        echo "::endgroup::"
+
+    - name: Setup environment
+      shell: bash
+      run: |
+        echo "::group::Setup environment"
+        SRC_DIR="$(dirname "$(dirname "$GITHUB_WORKSPACE")")/openwrt"
+        echo "WORK_DIR=$SRC_DIR" >> $GITHUB_ENV
+        echo "CCACHE_DIR=$SRC_DIR/.ccache" >> $GITHUB_ENV
+        echo "CCACHE_MAXSIZE=6GiB" >> $GITHUB_ENV
+        echo "CCACHE_NOCOMPRESS=true" >> $GITHUB_ENV
+        echo "/usr/lib/ccache" >> $GITHUB_PATH
+        echo "::endgroup::"
+
+    - name: Clone source
+      shell: bash
+      run: |
+        echo "::group::Clone source"
+        git clone --quiet --branch ${{ inputs.repo_branch }} --single-branch ${{ inputs.repo_url }} "$WORK_DIR" && \
+        git -C "$WORK_DIR" rev-parse HEAD
+        echo "::endgroup::"
+
+    - name: Restore ccache
+      uses: actions/cache/restore@v6
+      with:
+        path: ${{ env.CCACHE_DIR }}
+        key: ccache-${{ hashFiles('inputs/base.config') }}
+        restore-keys: |
+          ccache-
+
+    - name: Restore stamp
+      uses: actions/cache/restore@v6
+      with:
+        path: ${{ env.WORK_DIR }}/.stamp
+        key: tools-${{ hashFiles('inputs/base.config') }}
+        restore-keys: |
+          tools-
+
+    - name: Restore toolchain
+      uses: actions/cache/restore@v6
+      with:
+        path: |
+          ${{ env.WORK_DIR }}/build_dir
+          ${{ env.WORK_DIR }}/staging_dir
+          ${{ env.WORK_DIR }}/dl
+          ${{ env.WORK_DIR }}/tmp
+        key: toolchain-${{ hashFiles('inputs/base.config') }}
+        restore-keys: |
+          toolchain-
+
+    - name: Load config
+      shell: bash
+      run: |
+        echo "::group::Load config"
+        echo "input: $(sha256sum "inputs/base.config" 2>/dev/null | cut -d' ' -f1)" || true
+        cp -a "inputs/base.config" "$WORK_DIR/"
+        echo "output: $(sha256sum "$WORK_DIR/base.config" 2>/dev/null | cut -d' ' -f1)" || true
+        echo "::endgroup::"
+
+    - name: Prepare base
+      shell: bash
+      working-directory: ${{ env.WORK_DIR }}
+      run: |
+        echo "::group::Prepare base"
+        wget -q -T 15 -t 5 -O- ${{ inputs.prepare_base }} | bash
+        echo "::endgroup::"
+
+    - name: Tweak feeds
+      shell: bash
+      working-directory: ${{ env.WORK_DIR }}
+      run: |
+        echo "::group::Tweak feeds"
+        sed -i \
+            -e 's,https://git.openwrt.org/feed/,https://github.com/openwrt/,' \
+            -e 's,https://git.openwrt.org/openwrt/,https://github.com/openwrt/,' \
+            -e 's,https://git.openwrt.org/project/,https://github.com/openwrt/,' \
+            feeds.conf.default
+        sed -i 's|^\(src-git routing \)|#\1|' feeds.conf.default
+        sed -i 's|^\(src-git telephony \)|#\1|' feeds.conf.default
+        sed -i 's|^\(src-git video \)|#\1|' feeds.conf.default
+        echo "::endgroup::"
+
+    - name: Import keys
+      shell: bash
+      working-directory: ${{ env.WORK_DIR }}
+      run: |
+        echo "::group::Import keys"
+        printf '%s' "${{ inputs.private_key }}" > private-key.pem
+        printf '%s' "${{ inputs.public_key }}" > public-key.pem
+        echo "::endgroup::"
+
+    - name: Setup feeds
+      shell: bash
+      working-directory: ${{ env.WORK_DIR }}
+      run: |
+        echo "::group::Setup feeds"
+        runmk ./scripts/feeds update -a
+        runmk ./scripts/feeds install -a
+        echo "::endgroup::"
+
+    - name: Extend configuration
+      shell: bash
+      working-directory: ${{ env.WORK_DIR }}
+      run: |
+        echo "::group::Extend configuration"
+        wget -q -T 15 -t 5 -O- ${{ inputs.extend_config }} | bash
+        echo "::endgroup::"
+
+    - name: Generate config
+      shell: bash
+      working-directory: ${{ env.WORK_DIR }}
+      run: |
+        echo "::group::Generate config"
+        cat base.config > .config
+        runmk make defconfig
+        echo "::endgroup::"
+
+    - name: Build tools (rebuild)
+      if: inputs.enable_build_tools == 'true'
+      shell: bash
+      working-directory: ${{ env.WORK_DIR }}
+      run: |
+        echo "::group::Build tools (rebuild)"
+        runmk make tools/compile -j$(nproc) || runmk make tools/compile V=s
+        echo "::endgroup::"
+
+    - name: Build tools
+      id: build_tools
+      shell: bash
+      working-directory: ${{ env.WORK_DIR }}
+      run: |
+        echo "::group::Build tools"
+        stamp_file=".stamp/tools_commit"
+        commit_stamp=""
+        [ -f "$stamp_file" ] && commit_stamp=$(cat "$stamp_file")
+
+        if [ "$tools_commit" != "$commit_stamp" ]; then
+            if [ "${{ inputs.enable_build_tools }}" != 'true' ]; then
+                runmk make tools/compile -j$(nproc) || runmk make tools/compile V=s
+            fi
+            mkdir -p .stamp
+            echo "$tools_commit" > "$stamp_file"
+            echo "save=true" >> "$GITHUB_OUTPUT"
+            echo "status=success" >> "$GITHUB_OUTPUT"
+        else
+            echo "tools: skip"            
+        fi
+        echo "::endgroup::"
+
+    - name: Clean stamp
+      if: steps.build_tools.outputs.status == 'success' && steps.build_tools.outputs.save == 'true'
+      shell: bash
+      continue-on-error: true
+      env:
+        GH_TOKEN: ${{ github.token }}
+      run: |
+        echo "::group::Clean stamp"
+        gh cache list | awk -v pfx="tools" '$2 ~ pfx { print $2 }' | while read -r cache_key; do
+          echo "cache keys: $cache_key"
+          gh cache delete "$cache_key"
+        done
+        echo "::endgroup::"
+
+    - name: Save stamp
+      if: steps.build_tools.outputs.status == 'success' && steps.build_tools.outputs.save == 'true'
+      uses: actions/cache/save@v6
+      with:
+        path: |
+          ${{ env.WORK_DIR }}/.stamp
+        key: tools-${{ hashFiles('inputs/base.config') }}
+
+    - name: Build toolchain
+      id: build_toolchain
+      shell: bash
+      working-directory: ${{ env.WORK_DIR }}
+      run: |
+        echo "::group::Build toolchain"
+        runmk make toolchain/compile -j$(nproc) || runmk make toolchain/compile V=s
+        echo "status=success" >> "$GITHUB_OUTPUT"
+        echo "::endgroup::"
+
+    - name: Clean toolchain
+      if: steps.build_toolchain.outputs.status == 'success'
+      shell: bash
+      continue-on-error: true
+      env:
+        GH_TOKEN: ${{ github.token }}
+      run: |
+        echo "::group::Clean toolchain"
+        gh cache list | awk -v pfx="toolchain" '$2 ~ pfx { print $2 }' | while read -r cache_key; do
+          echo "cache keys: $cache_key"
+          gh cache delete "$cache_key"
+        done
+        echo "::endgroup::"
+
+    - name: Save toolchain
+      uses: actions/cache/save@v6
+      with:
+        path: |
+          ${{ env.WORK_DIR }}/build_dir
+          ${{ env.WORK_DIR }}/staging_dir
+          ${{ env.WORK_DIR }}/dl
+          ${{ env.WORK_DIR }}/tmp
+        key: toolchain-${{ hashFiles('inputs/base.config') }}
+
+    - name: Clean ccache [0]
+      if: steps.build_toolchain.outputs.status == 'success'
+      shell: bash
+      continue-on-error: true
+      env:
+        GH_TOKEN: ${{ github.token }}
+      run: |
+        echo "::group::Clean ccache [0]"
+
+        ccache_bin="${{ env.WORK_DIR }}/staging_dir/host/bin/ccache"
+
+        if [ -x "$ccache_bin" ]; then
+          "$ccache_bin" -c || true
+        fi
+
+        gh cache list | awk -v pfx="ccache" '$2 ~ pfx { print $2 }' | while read -r cache_key; do
+          echo "cache keys: $cache_key"
+          gh cache delete "$cache_key"
+        done
+
+        echo "::endgroup::"
+
+    - name: Save ccache [0]
+      continue-on-error: true
+      uses: actions/cache/save@v6
+      with:
+        path: ${{ env.CCACHE_DIR }}
+        key: ccache-${{ hashFiles('inputs/base.config') }}
+
+    - name: Build kernel
+      if: inputs.enable_build_kernel == 'true'
+      shell: bash
+      working-directory: ${{ env.WORK_DIR }}
+      run: |
+        echo "::group::Build kernel"
+        runmk make target/compile -j$(nproc) || runmk make target/compile V=s
+        echo "::endgroup::"
+
+    - name: Build everything
+      id: build_full
+      shell: bash
+      working-directory: ${{ env.WORK_DIR }}
+      run: |
+        echo "::group::Build everything"
+        runmk make -j$(nproc) || runmk make V=s
+        echo "status=success" >> "$GITHUB_OUTPUT"
+        echo "::endgroup::"
+
+    - name: Clean ccache
+      if: steps.build_full.outputs.status == 'success'
+      shell: bash
+      continue-on-error: true
+      env:
+        GH_TOKEN: ${{ github.token }}
+      run: |
+        echo "::group::Clean ccache"
+
+        ccache_bin="${{ env.WORK_DIR }}/staging_dir/host/bin/ccache"
+
+        if [ -x "$ccache_bin" ]; then
+          "$ccache_bin" -c || true
+        fi
+
+        gh cache list | awk -v pfx="ccache" '$2 ~ pfx { print $2 }' | while read -r cache_key; do
+          echo "cache keys: $cache_key"
+          gh cache delete "$cache_key"
+        done
+
+        echo "::endgroup::"
+
+    - name: Save ccache
+      continue-on-error: true
+      uses: actions/cache/save@v6
+      with:
+        path: ${{ env.CCACHE_DIR }}
+        key: ccache-${{ hashFiles('inputs/base.config') }}
+
+    - name: Export distribution
+      shell: bash
+      working-directory: ${{ env.WORK_DIR }}
+      run: |
+        echo "::group::Export distribution"
+        wget -q -T 15 -t 5 -O- ${{ inputs.export_dist }} | bash
+        echo "::endgroup::"
+
+    - name: Print duration
+      shell: bash
+      run: |
+        echo "::group::Print duration"
+        start_time="${{ steps.timezone.outputs.start_time }}"
+        end_time=$(date +"%Y-%m-%d %H:%M:%S")
+        build_start_sec=$(date -d "$start_time" +%s)
+        build_end_sec=$(date -d "$end_time" +%s)
+        build_duration=$((build_end_sec - build_start_sec))
+        hours=$((build_duration / 3600))
+        minutes=$(( (build_duration % 3600) / 60 ))
+        seconds=$((build_duration % 60))
+        total_duration="${hours}h ${minutes}m ${seconds}s"
+        echo "start time: $start_time"
+        echo "end time: $end_time"
+        echo "total duration: $total_duration"
+        echo "::endgroup::"
