@@ -292,11 +292,11 @@ runs:
       run: |
         echo "::group::Clean ccache [0]"
 
-        ccache_bin="${{ env.WORK_DIR }}/staging_dir/host/bin/ccache"
+        # ccache_bin="${{ env.WORK_DIR }}/staging_dir/host/bin/ccache"
 
-        if [ -x "$ccache_bin" ]; then
-          "$ccache_bin" -c || true
-        fi
+        # if [ -x "$ccache_bin" ]; then
+        #   "$ccache_bin" -c || true
+        # fi
 
         gh cache list | awk -v pfx="ccache" '$2 ~ pfx { print $2 }' | while read -r cache_key; do
           echo "cache keys: $cache_key"
@@ -314,12 +314,44 @@ runs:
 
     - name: Build kernel
       if: inputs.enable_build_kernel == 'true'
+      id: build_kernel
       shell: bash
       working-directory: ${{ env.WORK_DIR }}
       run: |
         echo "::group::Build kernel"
         runmk make target/compile -j$(nproc) || runmk make target/compile V=s
+        echo "status=success" >> "$GITHUB_OUTPUT"
         echo "::endgroup::"
+
+    - name: Clean ccache [1]
+      if: steps.build_kernel.outputs.status == 'success'
+      shell: bash
+      continue-on-error: true
+      env:
+        GH_TOKEN: ${{ github.token }}
+      run: |
+        echo "::group::Clean ccache [1]"
+
+        # ccache_bin="${{ env.WORK_DIR }}/staging_dir/host/bin/ccache"
+
+        # if [ -x "$ccache_bin" ]; then
+        #   "$ccache_bin" -c || true
+        # fi
+
+        gh cache list | awk -v pfx="ccache" '$2 ~ pfx { print $2 }' | while read -r cache_key; do
+          echo "cache keys: $cache_key"
+          gh cache delete "$cache_key"
+        done
+
+        echo "::endgroup::"
+
+    - name: Save ccache [1]
+      if: steps.build_kernel.outputs.status == 'success'
+      continue-on-error: true
+      uses: actions/cache/save@v6
+      with:
+        path: ${{ env.CCACHE_DIR }}
+        key: ccache-${{ hashFiles('inputs/base.config') }}
 
     - name: Build everything
       id: build_full
@@ -340,11 +372,11 @@ runs:
       run: |
         echo "::group::Clean ccache"
 
-        ccache_bin="${{ env.WORK_DIR }}/staging_dir/host/bin/ccache"
+        # ccache_bin="${{ env.WORK_DIR }}/staging_dir/host/bin/ccache"
 
-        if [ -x "$ccache_bin" ]; then
-          "$ccache_bin" -c || true
-        fi
+        # if [ -x "$ccache_bin" ]; then
+        #   "$ccache_bin" -c || true
+        # fi
 
         gh cache list | awk -v pfx="ccache" '$2 ~ pfx { print $2 }' | while read -r cache_key; do
           echo "cache keys: $cache_key"
