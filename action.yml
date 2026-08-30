@@ -87,7 +87,7 @@ runs:
         SRC_DIR="$(dirname "$(dirname "$GITHUB_WORKSPACE")")/openwrt"
         echo "WORK_DIR=$SRC_DIR" >> $GITHUB_ENV
         echo "CCACHE_DIR=$SRC_DIR/.ccache" >> $GITHUB_ENV
-        echo "CCACHE_MAXSIZE=6GiB" >> $GITHUB_ENV
+        echo "CCACHE_MAXSIZE=5GiB" >> $GITHUB_ENV
         echo "CCACHE_NOCOMPRESS=true" >> $GITHUB_ENV
         echo "/usr/lib/ccache" >> $GITHUB_PATH
         echo "::endgroup::"
